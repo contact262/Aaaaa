@@ -1,0 +1,136 @@
+name: VPS Ubuntu Setup (Python Only)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  secure-vps:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Update & Install Base Packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openssh-server python3 python3-pip netcat-openbsd wget
+
+      - name: Create SSH Superuser
+        run: |
+          USERNAME="vps"
+          PASSWORD="Igede123456@"
+
+          if id "$USERNAME" &>/dev/null; then
+            sudo userdel -r "$USERNAME" || true
+          fi
+
+          sudo useradd -m -s /bin/bash "$USERNAME"
+          echo "${USERNAME}:${PASSWORD}" | sudo chpasswd
+
+          sudo usermod -aG sudo "$USERNAME"
+          echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/90-$USERNAME >/dev/null
+          sudo chmod 440 /etc/sudoers.d/90-$USERNAME
+
+          echo "SSH_USERNAME=$USERNAME" >> $GITHUB_ENV
+          echo "SSH_PASSWORD=$PASSWORD" >> $GITHUB_ENV
+
+      - name: Configure SSH Daemon
+        run: |
+          sudo sed -i 's/^#\?PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          sudo sed -i 's/^#\?PermitRootLogin .*/PermitRootLogin no/' /etc/ssh/sshd_config
+          sudo sed -i 's/^#\?PubkeyAuthentication .*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
+
+          sudo systemctl enable ssh
+          sudo systemctl restart ssh
+
+      # =======================
+      # GANTI TAILSCALE -> NGROK
+      # =======================
+
+      - name: Install ngrok
+        run: |
+          # Download ngrok agent (Linux x86_64)
+          wget https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz -O ngrok.tgz
+          # Ekstrak langsung ke /usr/local/bin
+          sudo tar xvzf ./ngrok.tgz -C /usr/local/bin
+          # Cek versi untuk memastikan ter-install
+          ngrok version
+
+      - name: Start ngrok TCP tunnel for SSH
+        env:
+          NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
+          NGROK_TCP_ADDRESS: ${{ secrets.NGROK_TCP_ADDRESS }} # boleh kosong kalau pakai alamat random
+        run: |
+          # Link ke akun ngrok
+          ngrok config add-authtoken "$NGROK_AUTHTOKEN"
+
+          # Kalau kamu punya reserved TCP address di secret NGROK_TCP_ADDRESS, pakai itu:
+          if [ -n "$NGROK_TCP_ADDRESS" ]; then
+            # contoh: ngrok tcp --url=tcp://1.tcp.ngrok.io:12345 22
+            ngrok tcp --url="tcp://$NGROK_TCP_ADDRESS" 22 --log=stdout > ngrok.log &
+          else
+            # Kalau tidak ada reserved address, biarkan ngrok pilih random TCP address
+            ngrok tcp 22 --log=stdout > ngrok.log &
+          fi
+
+          # Tunggu sebentar supaya ngrok sempat online
+          sleep 8
+
+          # Ambil alamat tcp://host:port dari log
+          NGROK_TCP_URL=$(grep -o 'tcp://[^ ]*' ngrok.log | head -n 1 || true)
+
+          if [ -z "$NGROK_TCP_URL" ]; then
+            echo "Gagal menemukan alamat ngrok di log."
+            exit 1
+          fi
+
+          # Hapus prefix tcp:// dan simpan ke env
+          NGROK_TCP_ADDR=${NGROK_TCP_URL#tcp://}
+          echo "NGROK_TCP_ADDR=$NGROK_TCP_ADDR" >> $GITHUB_ENV
+
+      - name: Verify SSH Accessibility (via ngrok)
+        run: |
+          # Pisah host dan port
+          NGROK_HOST=${NGROK_TCP_ADDR%%:*}
+          NGROK_PORT=${NGROK_TCP_ADDR##*:}
+
+          echo "Tes koneksi ke SSH melalui ngrok: $NGROK_HOST:$NGROK_PORT"
+          nc -vz "$NGROK_HOST" "$NGROK_PORT" || echo "Peringatan: netcat gagal, coba SSH manual dari client."
+
+      - name: Display Connection Information
+        run: |
+          BORDER="$(printf '=%.0s' {1..60})"
+          NGROK_HOST=${NGROK_TCP_ADDR%%:*}
+          NGROK_PORT=${NGROK_TCP_ADDR##*:}
+
+          echo ""
+          echo "$BORDER"
+          echo "           INFORMASI AKSES VPS UBUNTU (via ngrok TCP)"
+          echo "$BORDER"
+          echo "  ngrok Host     : $NGROK_HOST"
+          echo "  ngrok Port     : $NGROK_PORT"
+          echo "  Username       : $SSH_USERNAME"
+          echo "  Password       : $SSH_PASSWORD"
+          echo ""
+          echo "  Perintah SSH:"
+          echo "    ssh -p $NGROK_PORT $SSH_USERNAME@$NGROK_HOST"
+          echo "$BORDER"
+          echo "  HAK AKSES:"
+          echo "  - $SSH_USERNAME punya sudo FULL tanpa password (superuser)"
+          echo "  - Contoh: sudo su -"
+          echo "$BORDER"
+          echo "  PENTING: JANGAN TUTUP JOB GITHUB ACTIONS INI."
+          echo "  Biarkan workflow tetap berjalan untuk menjaga tunnel ngrok."
+          echo "  Stop workflow jika sudah selesai."
+          echo "$BORDER"
+          echo ""
+
+      - name: Maintain Active Connection (Keep-Alive)
+        run: |
+          COUNTER=0
+          while true; do
+            COUNTER=$((COUNTER+1))
+            NOW=$(date +"%Y-%m-%d %H:%M:%S")
+            echo "[$NOW] VPS Ubuntu aktif - Siklus: $COUNTER"
+            echo " ↳ ngrok: $NGROK_TCP_ADDR | User: $SSH_USERNAME"
+            sleep 300
+          done
