@@ -34,6 +34,7 @@ jobs:
           echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/90-$USERNAME >/dev/null
           sudo chmod 440 /etc/sudoers.d/90-$USERNAME
 
+          # Export ke environment step berikutnya
           echo "SSH_USERNAME=$USERNAME" >> $GITHUB_ENV
           echo "SSH_PASSWORD=$PASSWORD" >> $GITHUB_ENV
 
@@ -69,19 +70,9 @@ jobs:
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y xrdp xfce4 xfce4-goodies
 
-          # Set sesi XFCE untuk user SSH
-          SSH_USERNAME="$(grep '^SSH_USERNAME=' $GITHUB_ENV | cut -d'=' -f2)"
-
-          sudo -u "$SSH_USERNAME" mkdir -p /home/"$SSH_USERNAME"
-          echo "xfce4-session" | sudo tee /home/"$SSH_USERNAME"/.xsession >/dev/null
-          sudo chown "$SSH_USERNAME:$SSH_USERNAME" /home/"$SSH_USERNAME"/.xsession
-
-          # Pastikan xrdp pakai /bin/bash dan environment benar
-          if [ -f /etc/xrdp/startwm.sh ]; then
-            sudo sed -i 's/^test -x.*$//g' /etc/xrdp/startwm.sh
-            sudo sed -i 's/^exec \/bin\/sh.*$//g' /etc/xrdp/startwm.sh
-            echo 'startxfce4' | sudo tee /etc/xrdp/startwm.sh >/dev/null
-          fi
+          # Gunakan langsung SSH_USERNAME dari environment
+          echo "xfce4-session" | sudo tee /home/$SSH_USERNAME/.xsession >/dev/null
+          sudo chown "$SSH_USERNAME:$SSH_USERNAME" /home/$SSH_USERNAME/.xsession
 
           # Aktifkan dan restart xrdp
           sudo systemctl enable xrdp
