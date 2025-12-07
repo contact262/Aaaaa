@@ -1,7 +1,7 @@
-name: VPS Ubuntu via Cloudflare Tunnel
+name: VPS Ubuntu Setup (Python + RDP)
 
 on:
-  workflow_dispatch:
+  workflow_dispatch:  # Trigger manual
 
 jobs:
   secure-vps:
@@ -12,12 +12,13 @@ jobs:
       - name: Update & Install Base Packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y openssh-server python3 python3-pip netcat-openbsd
+          sudo apt-get install -y openssh-server python3 python3-pip netcat-openbsd curl
 
       - name: Create SSH Superuser
+        # PERINGATAN: Hardcode password tidak aman, sebaiknya pakai GitHub Secrets
         run: |
           USERNAME="vps"
-          PASSWORD="Igede123456@"  # hardcode
+          PASSWORD="Igede123456@"  # sama seperti sebelumnya
 
           # Hapus user lama bila ada
           if id "$USERNAME" &>/dev/null; then
@@ -33,7 +34,6 @@ jobs:
           echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/90-$USERNAME >/dev/null
           sudo chmod 440 /etc/sudoers.d/90-$USERNAME
 
-          # Export ke env untuk step berikutnya
           echo "SSH_USERNAME=$USERNAME" >> $GITHUB_ENV
           echo "SSH_PASSWORD=$PASSWORD" >> $GITHUB_ENV
 
@@ -46,66 +46,103 @@ jobs:
           sudo systemctl enable ssh
           sudo systemctl restart ssh
 
-      - name: Install cloudflared
+      - name: Install Tailscale
         run: |
-          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb -O cloudflared.deb
-          sudo dpkg -i cloudflared.deb
-          cloudflared --version
+          curl -fsSL https://tailscale.com/install.sh | sh
 
-      - name: Start Cloudflare Tunnel (HARDCODED TOKEN)
+      - name: Establish Tailscale Connection
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
-          TOKEN='eyJhIjoiY2Q5OGM5NDRhOWE3NDI1MWU1N2E5ZWZiNGI5ZjRiMjQiLCJ0IjoiZTkxMDE0MjQtNTRkYy00MThmLWE4ZjgtZTZhYTEwMzU5YWVjIiwicyI6Ill6QmpNVGd6TURBdFptWXhaQzAwWmpneExUaGxNR0V0TlRRMVpUUTJORFppWkRBNSJ9'
+          HOSTNAME="gh-vps-${GITHUB_RUN_ID}"
 
-          if [ -z "$TOKEN" ]; then
-            echo "TOKEN kosong."
-            exit 1
+          sudo tailscale up --authkey="${TAILSCALE_AUTH_KEY}" --hostname="${HOSTNAME}" --accept-routes
+
+          TS_IP=$(tailscale ip -4 | head -n 1)
+
+          echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
+          echo "VPS_HOSTNAME=$HOSTNAME" >> $GITHUB_ENV
+
+      - name: Install Desktop & RDP Server (xrdp + XFCE)
+        run: |
+          # Install desktop ringan dan xrdp
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y xrdp xfce4 xfce4-goodies
+
+          # Set sesi XFCE untuk user SSH
+          SSH_USERNAME="$(grep '^SSH_USERNAME=' $GITHUB_ENV | cut -d'=' -f2)"
+
+          sudo -u "$SSH_USERNAME" mkdir -p /home/"$SSH_USERNAME"
+          echo "xfce4-session" | sudo tee /home/"$SSH_USERNAME"/.xsession >/dev/null
+          sudo chown "$SSH_USERNAME:$SSH_USERNAME" /home/"$SSH_USERNAME"/.xsession
+
+          # Pastikan xrdp pakai /bin/bash dan environment benar
+          if [ -f /etc/xrdp/startwm.sh ]; then
+            sudo sed -i 's/^test -x.*$//g' /etc/xrdp/startwm.sh
+            sudo sed -i 's/^exec \/bin\/sh.*$//g' /etc/xrdp/startwm.sh
+            echo 'startxfce4' | sudo tee /etc/xrdp/startwm.sh >/dev/null
           fi
 
-          cloudflared tunnel run --no-autoupdate --token "$TOKEN" > cloudflared.log 2>&1 &
+          # Aktifkan dan restart xrdp
+          sudo systemctl enable xrdp
+          sudo systemctl restart xrdp
 
-          sleep 15
+      - name: Verify SSH Accessibility (via Tailscale)
+        run: |
+          echo "Tes koneksi ke port 22 VPS (via Tailscale)..."
+          nc -vz "$TAILSCALE_IP" 22 || echo "Peringatan: tes netcat gagal, cek manual dari client."
 
-      - name: Display Connection Information (Cloudflare)
-        env:
-          CF_SSH_HOSTNAME: ${{ secrets.CF_SSH_HOSTNAME }}
+      - name: Verify RDP Port (3389 via Tailscale)
+        run: |
+          echo "Tes koneksi ke port 3389 (RDP) VPS (via Tailscale)..."
+          nc -vz "$TAILSCALE_IP" 3389 || echo "Peringatan: port 3389 belum bisa diakses, cek xrdp/log."
+
+      - name: Display Connection Information (SSH + RDP)
         run: |
           BORDER="$(printf '=%.0s' {1..60})"
-          HOSTNAME_SHOW=${CF_SSH_HOSTNAME:-"gha-ssh.example.com"}
-
           echo ""
           echo "$BORDER"
-          echo "         INFORMASI AKSES VPS UBUNTU (via Cloudflare Tunnel)"
+          echo "           INFORMASI AKSES VPS UBUNTU (SUPERUSER + RDP)"
           echo "$BORDER"
-          echo "  Hostname (Cloudflare) : $HOSTNAME_SHOW"
-          echo "  Username              : $SSH_USERNAME"
-          echo "  Password              : $SSH_PASSWORD"
+          echo "  Address (IP Tailscale) : $TAILSCALE_IP"
+          echo "  Hostname               : $VPS_HOSTNAME"
+          echo "  Username               : $SSH_USERNAME"
+          echo "  Password               : $SSH_PASSWORD"
           echo ""
-          echo "  Akses via browser (SSH Web Terminal):"
-          echo "    1) Buka https://$HOSTNAME_SHOW"
-          echo "    2) Login sesuai policy Zero Trust"
-          echo "    3) Masukkan user: $SSH_USERNAME"
+          echo "  SSH:"
+          echo "    ssh $SSH_USERNAME@$TAILSCALE_IP"
+          echo ""
+          echo "  RDP:"
+          echo "    Host / Computer  : $TAILSCALE_IP:3389"
+          echo "    User / Username  : $SSH_USERNAME"
+          echo "    Password         : $SSH_PASSWORD"
+          echo "    Desktop          : XFCE (via xrdp)"
           echo "$BORDER"
           echo "  HAK AKSES:"
-          echo "  - $SSH_USERNAME punya sudo FULL tanpa password"
+          echo "  - $SSH_USERNAME punya sudo FULL tanpa password (superuser)"
           echo "  - Contoh: sudo su -"
           echo "$BORDER"
-          echo "  Workflow ini harus tetap RUNNING agar tunnel aktif."
+          echo "  PENTING: JANGAN TUTUP JOB GITHUB ACTIONS INI."
+          echo "  Biarkan workflow tetap berjalan untuk menjaga sesi."
+          echo "  Stop workflow jika sudah selesai."
           echo "$BORDER"
           echo ""
 
       - name: Maintain Active Connection (Keep-Alive)
-        env:
-          CF_SSH_HOSTNAME: ${{ secrets.CF_SSH_HOSTNAME }}
         run: |
           COUNTER=0
           while true; do
             COUNTER=$((COUNTER+1))
             NOW=$(date +"%Y-%m-%d %H:%M:%S")
             echo "[$NOW] VPS Ubuntu aktif - Siklus: $COUNTER"
-            echo " ↳ Cloudflare SSH hostname: ${CF_SSH_HOSTNAME:-gha-ssh.example.com} | User: $SSH_USERNAME"
+            echo " ↳ IP: $TAILSCALE_IP | User: $SSH_USERNAME"
+            if [ $((COUNTER % 3)) -eq 0 ]; then
+              echo " ↳ Memeriksa status Tailscale..."
+              tailscale status || true
+            fi
             if [ $((COUNTER % 6)) -eq 0 ]; then
-              echo " ↳ Log ringkas cloudflared (10 baris terakhir):"
-              tail -n 10 cloudflared.log || echo "log belum tersedia"
+              echo " ↳ Memeriksa status xrdp..."
+              systemctl status xrdp --no-pager || true
             fi
             sleep 300
           done
