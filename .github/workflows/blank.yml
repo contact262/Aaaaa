@@ -1,4 +1,18 @@
-- name: Install cloudflared
+name: Cloudflare Tunnel
+
+on:
+  workflow_dispatch:
+
+jobs:
+  tunnel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install cloudflared
         run: |
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb -O cloudflared.deb
           sudo dpkg -i cloudflared.deb
@@ -13,17 +27,16 @@
             exit 1
           fi
 
-          # Jalankan tunnel di background
           cloudflared tunnel run --no-autoupdate --token "$CF_TUNNEL_TOKEN" > cloudflared.log 2>&1 &
 
-          # Beri waktu konek ke edge Cloudflare
           sleep 15
-
-          echo "Cloudflare Tunnel dimulai. Lihat Zero Trust → Tunnels untuk status."
+          echo "Cloudflare Tunnel dimulai."
 
       - name: Display Connection Information (Cloudflare)
         env:
           CF_SSH_HOSTNAME: ${{ secrets.CF_SSH_HOSTNAME }}
+          SSH_USERNAME: ${{ secrets.SSH_USERNAME }}
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
         run: |
           BORDER="$(printf '=%.0s' {1..60})"
           HOSTNAME_SHOW=${CF_SSH_HOSTNAME:-"gha-ssh.example.com"}
@@ -35,22 +48,12 @@
           echo "  Hostname (Cloudflare) : $HOSTNAME_SHOW"
           echo "  Username              : $SSH_USERNAME"
           echo "  Password              : $SSH_PASSWORD"
-          echo ""
-          echo "  Akses via browser (SSH Web Terminal):"
-          echo "    1) Buka https://$HOSTNAME_SHOW"
-          echo "    2) Login sesuai policy Zero Trust"
-          echo "    3) Masukkan user: $SSH_USERNAME"
           echo "$BORDER"
-          echo "  HAK AKSES:"
-          echo "  - $SSH_USERNAME punya sudo FULL tanpa password"
-          echo "  - Contoh: sudo su -"
-          echo "$BORDER"
-          echo ""
 
       - name: Maintain Active Connection (Keep-Alive)
         run: |
           COUNTER=0
-          while true; do
+          while [ $COUNTER -lt 24 ]; do
             COUNTER=$((COUNTER+1))
             NOW=$(date +"%Y-%m-%d %H:%M:%S")
             echo "[$NOW] VPS Ubuntu aktif - Siklus: $COUNTER"
