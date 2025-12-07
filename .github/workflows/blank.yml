@@ -8,15 +8,23 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 360  # 6 jam
 
+    defaults:
+      run:
+        shell: bash
+
     steps:
       - name: Update & Install Base Packages
         run: |
+          set -euxo pipefail
           sudo apt-get update
           sudo apt-get install -y openssh-server python3 python3-pip netcat-openbsd curl
+          sudo systemctl enable ssh || true
+          sudo systemctl restart ssh || true
 
       - name: Create SSH Superuser
         # PERINGATAN: Hardcode password tidak aman, sebaiknya pakai GitHub Secrets
         run: |
+          set -euxo pipefail
           USERNAME="vps"
           PASSWORD="Igede123456@"  # sama seperti sebelumnya
 
@@ -35,47 +43,71 @@ jobs:
           sudo chmod 440 /etc/sudoers.d/90-$USERNAME
 
           # Export ke environment step berikutnya
-          echo "SSH_USERNAME=$USERNAME" >> $GITHUB_ENV
-          echo "SSH_PASSWORD=$PASSWORD" >> $GITHUB_ENV
+          echo "SSH_USERNAME=$USERNAME" >> "$GITHUB_ENV"
+          echo "SSH_PASSWORD=$PASSWORD" >> "$GITHUB_ENV"
 
       - name: Configure SSH Daemon
         run: |
+          set -euxo pipefail
           sudo sed -i 's/^#\?PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config
           sudo sed -i 's/^#\?PermitRootLogin .*/PermitRootLogin no/' /etc/ssh/sshd_config
           sudo sed -i 's/^#\?PubkeyAuthentication .*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
 
-          sudo systemctl enable ssh
-          sudo systemctl restart ssh
+          sudo systemctl enable ssh || true
+          sudo systemctl reload ssh || sudo systemctl restart ssh
 
       - name: Install Tailscale
         run: |
+          set -euxo pipefail
           curl -fsSL https://tailscale.com/install.sh | sh
+          sudo tailscale version || true
 
       - name: Establish Tailscale Connection
         env:
           TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
+          set -euxo pipefail
+
+          if [ -z "${TAILSCALE_AUTH_KEY:-}" ]; then
+            echo "ERROR: TAILSCALE_AUTH_KEY kosong. Set di GitHub Secrets."
+            exit 1
+          fi
+
           HOSTNAME="gh-vps-${GITHUB_RUN_ID}"
 
-          sudo tailscale up --authkey="${TAILSCALE_AUTH_KEY}" --hostname="${HOSTNAME}" --accept-routes
+          sudo tailscale up \
+            --authkey="${TAILSCALE_AUTH_KEY}" \
+            --hostname="${HOSTNAME}" \
+            --accept-routes
 
-          TS_IP=$(tailscale ip -4 | head -n 1)
+          # Beri sedikit waktu agar IP ter-assign
+          sleep 5
 
-          echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
-          echo "VPS_HOSTNAME=$HOSTNAME" >> $GITHUB_ENV
+          TS_IP=$(sudo tailscale ip -4 | head -n 1 || true)
+
+          if [ -z "$TS_IP" ]; then
+            echo "ERROR: Tidak bisa mendapatkan IP Tailscale (IPv4)."
+            sudo tailscale status || true
+            exit 1
+          fi
+
+          echo "TAILSCALE_IP=$TS_IP" >> "$GITHUB_ENV"
+          echo "VPS_HOSTNAME=$HOSTNAME" >> "$GITHUB_ENV"
 
       - name: Install Desktop & RDP Server (xrdp + XFCE)
         run: |
+          set -euxo pipefail
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
             xrdp xfce4 xfce4-session xfce4-goodies dbus-x11
 
           # Paksa sesi XFCE saat login RDP
-          echo "startxfce4" | sudo tee /home/$SSH_USERNAME/.xsession >/dev/null
-          sudo chown "$SSH_USERNAME:$SSH_USERNAME" /home/$SSH_USERNAME/.xsession
+          echo "startxfce4" | sudo tee "/home/$SSH_USERNAME/.xsession" >/dev/null
+          sudo chown "$SSH_USERNAME:$SSH_USERNAME" "/home/$SSH_USERNAME/.xsession"
 
           # Konfigurasi startwm.sh untuk xrdp → XFCE
-          sudo sed -i.bak '/^test -x .*$/d' /etc/xrdp/startwm.sh
+          sudo cp /etc/xrdp/startwm.sh /etc/xrdp/startwm.sh.bak || true
+          sudo sed -i '/^test -x .*$/d' /etc/xrdp/startwm.sh
           sudo sed -i '/^exec .*$/d' /etc/xrdp/startwm.sh
 
           cat << 'EOF' | sudo tee /etc/xrdp/startwm.sh >/dev/null
@@ -91,19 +123,23 @@ EOF
           # Aktifkan dan restart xrdp
           sudo systemctl enable xrdp
           sudo systemctl restart xrdp
+          sudo systemctl status xrdp --no-pager || true
 
       - name: Verify SSH Accessibility (via Tailscale)
         run: |
+          set -euxo pipefail
           echo "Tes koneksi ke port 22 VPS (via Tailscale)..."
-          nc -vz "$TAILSCALE_IP" 22 || echo "Peringatan: tes netcat gagal, cek manual dari client."
+          nc -vz "$TAILSCALE_IP" 22 || echo "Peringatan: tes netcat ke port 22 gagal, cek manual dari client."
 
       - name: Verify RDP Port (3389 via Tailscale)
         run: |
+          set -euxo pipefail
           echo "Tes koneksi ke port 3389 (RDP) VPS (via Tailscale)..."
-          nc -vz "$TAILSCALE_IP" 3389 || echo "Peringatan: port 3389 belum bisa diakses, cek xrdp/log."
+          nc -vz "$TAILSCALE_IP" 3389 || echo "Peringatan: port 3389 belum bisa diakses, cek layanan xrdp / firewall."
 
       - name: Display Connection Information (SSH + RDP)
         run: |
+          set -euxo pipefail
           BORDER="$(printf '=%.0s' {1..60})"
           echo ""
           echo "$BORDER"
@@ -135,6 +171,7 @@ EOF
 
       - name: Maintain Active Connection (Keep-Alive)
         run: |
+          set -euxo pipefail
           COUNTER=0
           while true; do
             COUNTER=$((COUNTER+1))
@@ -143,11 +180,11 @@ EOF
             echo " ↳ IP: $TAILSCALE_IP | User: $SSH_USERNAME"
             if [ $((COUNTER % 3)) -eq 0 ]; then
               echo " ↳ Memeriksa status Tailscale..."
-              tailscale status || true
+              sudo tailscale status || true
             fi
             if [ $((COUNTER % 6)) -eq 0 ]; then
               echo " ↳ Memeriksa status xrdp..."
-              systemctl status xrdp --no-pager || true
+              sudo systemctl status xrdp --no-pager || true
             fi
             sleep 300
           done
