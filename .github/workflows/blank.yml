@@ -17,7 +17,7 @@ jobs:
       - name: Create SSH Superuser
         run: |
           USERNAME="vps"
-          PASSWORD="Igede123456@"  # hardcode, sebaiknya pakai Secrets kalau untuk pemakaian beneran
+          PASSWORD="Igede123456@"  # hardcode
 
           # Hapus user lama bila ada
           if id "$USERNAME" &>/dev/null; then
@@ -46,34 +46,24 @@ jobs:
           sudo systemctl enable ssh
           sudo systemctl restart ssh
 
-      # ===========================
-      #  Cloudflare Tunnel
-      #  Secrets yang dibutuhkan:
-      #  - CF_TUNNEL_TOKEN     → token tunnel dari Cloudflare
-      #  - CF_SSH_HOSTNAME     → hostname publik, misal ssh.example.com
-      # ===========================
       - name: Install cloudflared
         run: |
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb -O cloudflared.deb
           sudo dpkg -i cloudflared.deb
           cloudflared --version
 
-      - name: Start Cloudflare Tunnel
-        env:
-          CF_TUNNEL_TOKEN: ${{ secrets.CF_TUNNEL_TOKEN }}
+      - name: Start Cloudflare Tunnel (HARDCODED TOKEN)
         run: |
-          if [ -z "$CF_TUNNEL_TOKEN" ]; then
-            echo "CF_TUNNEL_TOKEN kosong, cek GitHub Secrets."
+          TOKEN='eyJhIjoiY2Q5OGM5NDRhOWE3NDI1MWU1N2E5ZWZiNGI5ZjRiMjQiLCJ0IjoiZTkxMDE0MjQtNTRkYy00MThmLWE4ZjgtZTZhYTEwMzU5YWVjIiwicyI6Ill6QmpNVGd6TURBdFptWXhaQzAwWmpneExUaGxNR0V0TlRRMVpUUTJORFppWkRBNSJ9'
+
+          if [ -z "$TOKEN" ]; then
+            echo "TOKEN kosong."
             exit 1
           fi
 
-          # Jalankan tunnel di background
-          cloudflared tunnel run --no-autoupdate --token "$CF_TUNNEL_TOKEN" > cloudflared.log 2>&1 &
+          cloudflared tunnel run --no-autoupdate --token "$TOKEN" > cloudflared.log 2>&1 &
 
-          # Beri waktu konek ke edge Cloudflare
           sleep 15
-
-          echo "Cloudflare Tunnel dimulai. Cek Zero Trust → Tunnels untuk status."
 
       - name: Display Connection Information (Cloudflare)
         env:
@@ -99,9 +89,7 @@ jobs:
           echo "  - $SSH_USERNAME punya sudo FULL tanpa password"
           echo "  - Contoh: sudo su -"
           echo "$BORDER"
-          echo "  PENTING:"
-          echo "  - Workflow ini harus tetap RUNNING agar tunnel aktif."
-          echo "  - Stop workflow = matikan VPS sementara."
+          echo "  Workflow ini harus tetap RUNNING agar tunnel aktif."
           echo "$BORDER"
           echo ""
 
@@ -114,7 +102,7 @@ jobs:
             COUNTER=$((COUNTER+1))
             NOW=$(date +"%Y-%m-%d %H:%M:%S")
             echo "[$NOW] VPS Ubuntu aktif - Siklus: $COUNTER"
-            echo " ↳ Cloudflare SSH hostname: ${CF_SSH_HOSTNAME:-ssh.pahe.uk} | User: $SSH_USERNAME"
+            echo " ↳ Cloudflare SSH hostname: ${CF_SSH_HOSTNAME:-gha-ssh.example.com} | User: $SSH_USERNAME"
             if [ $((COUNTER % 6)) -eq 0 ]; then
               echo " ↳ Log ringkas cloudflared (10 baris terakhir):"
               tail -n 10 cloudflared.log || echo "log belum tersedia"
