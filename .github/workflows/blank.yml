@@ -66,13 +66,27 @@ jobs:
 
       - name: Install Desktop & RDP Server (xrdp + XFCE)
         run: |
-          # Install desktop ringan dan xrdp
           sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y xrdp xfce4 xfce4-goodies
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            xrdp xfce4 xfce4-session xfce4-goodies dbus-x11
 
-          # Gunakan langsung SSH_USERNAME dari environment
-          echo "xfce4-session" | sudo tee /home/$SSH_USERNAME/.xsession >/dev/null
+          # Paksa sesi XFCE saat login RDP
+          echo "startxfce4" | sudo tee /home/$SSH_USERNAME/.xsession >/dev/null
           sudo chown "$SSH_USERNAME:$SSH_USERNAME" /home/$SSH_USERNAME/.xsession
+
+          # Konfigurasi startwm.sh untuk xrdp → XFCE
+          sudo sed -i.bak '/^test -x .*$/d' /etc/xrdp/startwm.sh
+          sudo sed -i '/^exec .*$/d' /etc/xrdp/startwm.sh
+
+          cat << 'EOF' | sudo tee /etc/xrdp/startwm.sh >/dev/null
+#!/bin/sh
+unset DBUS_SESSION_BUS_ADDRESS
+unset XDG_RUNTIME_DIR
+. /etc/X11/Xsession
+startxfce4
+EOF
+
+          sudo chmod +x /etc/xrdp/startwm.sh
 
           # Aktifkan dan restart xrdp
           sudo systemctl enable xrdp
