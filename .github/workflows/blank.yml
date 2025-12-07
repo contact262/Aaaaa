@@ -1,17 +1,57 @@
-name: Cloudflare Tunnel
+name: VPS Ubuntu via Cloudflare Tunnel
 
 on:
   workflow_dispatch:
 
 jobs:
-  tunnel:
+  secure-vps:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 360  # 6 jam
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Update & Install Base Packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openssh-server python3 python3-pip netcat-openbsd
 
+      - name: Create SSH Superuser
+        run: |
+          USERNAME="vps"
+          PASSWORD="Igede123456@"  # hardcode, sebaiknya pakai Secrets kalau untuk pemakaian beneran
+
+          # Hapus user lama bila ada
+          if id "$USERNAME" &>/dev/null; then
+            sudo userdel -r "$USERNAME" || true
+          fi
+
+          # Buat user
+          sudo useradd -m -s /bin/bash "$USERNAME"
+          echo "${USERNAME}:${PASSWORD}" | sudo chpasswd
+
+          # Jadikan superuser (full sudo tanpa password)
+          sudo usermod -aG sudo "$USERNAME"
+          echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/90-$USERNAME >/dev/null
+          sudo chmod 440 /etc/sudoers.d/90-$USERNAME
+
+          # Export ke env untuk step berikutnya
+          echo "SSH_USERNAME=$USERNAME" >> $GITHUB_ENV
+          echo "SSH_PASSWORD=$PASSWORD" >> $GITHUB_ENV
+
+      - name: Configure SSH Daemon
+        run: |
+          sudo sed -i 's/^#\?PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          sudo sed -i 's/^#\?PermitRootLogin .*/PermitRootLogin no/' /etc/ssh/sshd_config
+          sudo sed -i 's/^#\?PubkeyAuthentication .*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
+
+          sudo systemctl enable ssh
+          sudo systemctl restart ssh
+
+      # ===========================
+      #  Cloudflare Tunnel
+      #  Secrets yang dibutuhkan:
+      #  - CF_TUNNEL_TOKEN     → token tunnel dari Cloudflare
+      #  - CF_SSH_HOSTNAME     → hostname publik, misal ssh.example.com
+      # ===========================
       - name: Install cloudflared
         run: |
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb -O cloudflared.deb
@@ -27,16 +67,17 @@ jobs:
             exit 1
           fi
 
+          # Jalankan tunnel di background
           cloudflared tunnel run --no-autoupdate --token "$CF_TUNNEL_TOKEN" > cloudflared.log 2>&1 &
 
+          # Beri waktu konek ke edge Cloudflare
           sleep 15
-          echo "Cloudflare Tunnel dimulai."
+
+          echo "Cloudflare Tunnel dimulai. Cek Zero Trust → Tunnels untuk status."
 
       - name: Display Connection Information (Cloudflare)
         env:
           CF_SSH_HOSTNAME: ${{ secrets.CF_SSH_HOSTNAME }}
-          SSH_USERNAME: ${{ secrets.SSH_USERNAME }}
-          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
         run: |
           BORDER="$(printf '=%.0s' {1..60})"
           HOSTNAME_SHOW=${CF_SSH_HOSTNAME:-"gha-ssh.example.com"}
@@ -48,15 +89,35 @@ jobs:
           echo "  Hostname (Cloudflare) : $HOSTNAME_SHOW"
           echo "  Username              : $SSH_USERNAME"
           echo "  Password              : $SSH_PASSWORD"
+          echo ""
+          echo "  Akses via browser (SSH Web Terminal):"
+          echo "    1) Buka https://$HOSTNAME_SHOW"
+          echo "    2) Login sesuai policy Zero Trust"
+          echo "    3) Masukkan user: $SSH_USERNAME"
           echo "$BORDER"
+          echo "  HAK AKSES:"
+          echo "  - $SSH_USERNAME punya sudo FULL tanpa password"
+          echo "  - Contoh: sudo su -"
+          echo "$BORDER"
+          echo "  PENTING:"
+          echo "  - Workflow ini harus tetap RUNNING agar tunnel aktif."
+          echo "  - Stop workflow = matikan VPS sementara."
+          echo "$BORDER"
+          echo ""
 
       - name: Maintain Active Connection (Keep-Alive)
+        env:
+          CF_SSH_HOSTNAME: ${{ secrets.CF_SSH_HOSTNAME }}
         run: |
           COUNTER=0
-          while [ $COUNTER -lt 24 ]; do
+          while true; do
             COUNTER=$((COUNTER+1))
             NOW=$(date +"%Y-%m-%d %H:%M:%S")
             echo "[$NOW] VPS Ubuntu aktif - Siklus: $COUNTER"
-            echo " ↳ Cloudflare SSH hostname: ${CF_SSH_HOSTNAME:-gha-ssh.example.com} | User: $SSH_USERNAME"
+            echo " ↳ Cloudflare SSH hostname: ${CF_SSH_HOSTNAME:-ssh.pahe.uk} | User: $SSH_USERNAME"
+            if [ $((COUNTER % 6)) -eq 0 ]; then
+              echo " ↳ Log ringkas cloudflared (10 baris terakhir):"
+              tail -n 10 cloudflared.log || echo "log belum tersedia"
+            fi
             sleep 300
           done
